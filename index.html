@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MetroSpot | Parking reservations</title>
+  <style>
+:root {
+  color-scheme: light;
+  --ink: #122b27;
+  --muted: #49605a;
+  --paper: #f3f6f2;
+  --line: #d4ded7;
+  --green: #145548;
+  --light-green: #e4f1ea;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.5 "DM Sans", Inter, system-ui, sans-serif; }
+.wrap { width: min(1120px, calc(100% - 40px)); margin: 0 auto; }
+.top { background: #12372f; color: white; }
+.nav, nav, .brand { display: flex; align-items: center; gap: 18px; }
+.nav { justify-content: space-between; min-height: 70px; }
+a { color: inherit; }
+.brand { gap: 10px; text-decoration: none; font-size: 1.2rem; font-weight: 800; }
+.mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; background: #d7f0a8; color: #163d33; }
+.heading { padding: 36px 0 23px; }
+h1, h2, h3, p { margin: 0; }
+h1 { font-size: clamp(2rem, 5vw, 3.4rem); letter-spacing: -.055em; line-height: 1.07; }
+h2 { font-size: 1.3rem; letter-spacing: -.025em; margin-bottom: 16px; }
+h3 { font-size: 1rem; }
+.heading p { margin-top: 10px; }
+p { color: var(--muted); }
+.layout { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(280px, 1fr); gap: 18px; align-items: start; }
+.panel { background: white; border: 1px solid var(--line); border-radius: 16px; padding: 22px; }
+.login { max-width: 390px; }
+form { display: grid; gap: 9px; }
+label { display: block; font-size: .83rem; font-weight: 730; }
+input, select, button { font: inherit; border-radius: 8px; min-height: 42px; }
+input, select { width: 100%; border: 1px solid #b8c8bf; background: #fcfdfc; color: var(--ink); padding: 8px 10px; }
+button { cursor: pointer; padding: 8px 14px; border: 1px solid var(--green); background: var(--green); color: white; font-weight: 700; }
+button:hover:not(:disabled) { filter: brightness(.9); }
+button:disabled { opacity: .46; cursor: default; }
+button.outline { border-color: #76978d; background: transparent; }
+:focus-visible { outline: 3px solid #be791e; outline-offset: 3px; }
+form > button { margin-top: 7px; }
+.times { grid-template-columns: 1fr 1fr; }
+.time-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 7px; }
+.times button { grid-column: 1 / -1; justify-self: start; }
+.availability { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 16px; }
+#lot-help { margin: 4px 0 10px; font-size: .9rem; }
+.spots { display: grid; grid-template-columns: repeat(auto-fit, minmax(62px, 1fr)); gap: 7px; max-height: 275px; overflow-y: auto; padding: 4px; }
+.spots button { min-height: 38px; padding: 4px; font-size: .85rem; color: var(--green); background: var(--light-green); border-color: #bad4c6; }
+.spots button[aria-pressed="true"] { color: white; background: var(--green); }
+.selected { color: var(--green); font-weight: 800; font-size: 1.55rem; }
+#window { margin-bottom: 12px; font-size: .9rem; }
+.history { margin: 18px 0 30px; }
+.booking-row { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.booking-row:last-child { border-bottom: 0; }
+.booking-row code { display: block; overflow-wrap: anywhere; color: var(--muted); }
+.notice { background: var(--light-green); border-radius: 9px; color: #10483b; padding: 12px 14px; margin-bottom: 15px; }
+.notice.error { background: #fbeae7; color: #782c21; }
+@media (max-width: 730px) { .layout { grid-template-columns: 1fr; } }
+@media (max-width: 440px) { .times { grid-template-columns: 1fr; } .wrap { width: calc(100% - 24px); } }
+</style>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap nav">
+      <a class="brand" href="/"><span class="mark" aria-hidden="true">P</span> MetroSpot</a>
+      <nav aria-label="Main navigation">
+        <a href="/docs">API docs</a>
+        <button id="logout" type="button" class="outline" hidden>Sign out</button>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <div class="heading">
+      <h1>Reserve a parking spot</h1>
+      <p>Choose your parking times and book a numbered spot near the metro.</p>
+    </div>
+    <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+    <section id="login-panel" class="panel login">
+      <h2>Driver sign-in</h2>
+      <form id="login">
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username" placeholder="driver-a" required>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <button type="submit">Sign in</button>
+      </form>
+    </section>
+    <div id="workspace" hidden>
+      <div class="layout">
+        <section class="panel">
+          <h2>Find a spot</h2>
+          <form id="search" class="times">
+            <div>
+              <label for="arrival-date">Arrival date</label>
+              <input id="arrival-date" type="date" required>
+              <div class="time-controls">
+                <div><label for="arrival-hour">Arrival hour</label><select id="arrival-hour" required></select></div>
+                <div><label for="arrival-minute">Arrival minute</label><select id="arrival-minute" required></select></div>
+              </div>
+            </div>
+            <div>
+              <label for="departure-date">Departure date</label>
+              <input id="departure-date" type="date" required>
+              <div class="time-controls">
+                <div><label for="departure-hour">Departure hour</label><select id="departure-hour" required></select></div>
+                <div><label for="departure-minute">Departure minute</label><select id="departure-minute" required></select></div>
+              </div>
+            </div>
+            <button type="submit">Check availability</button>
+          </form>
+          <div class="availability">
+            <h3 id="spots-title">Available spots</h3>
+            <p id="lot-help">Search for a time window to see available spots.</p>
+            <div id="spots" class="spots" aria-labelledby="spots-title"></div>
+          </div>
+        </section>
+        <section class="panel summary">
+          <h2>Your booking</h2>
+          <p class="selected" id="selection">Select a spot</p>
+          <p id="window"></p>
+          <form id="booking">
+            <label for="driver-name">Driver name</label>
+            <input id="driver-name" name="driver_name" maxlength="100" autocomplete="name" required>
+            <label for="plate">License plate</label>
+            <input id="plate" name="license_plate" maxlength="16" pattern="[A-Za-z0-9][A-Za-z0-9 \-]{0,15}" placeholder="ABC123" required>
+            <button id="reserve" type="submit" disabled>Confirm reservation</button>
+          </form>
+        </section>
+      </div>
+      <section class="panel history">
+        <h2>My reservations</h2>
+        <div id="reservations"></div>
+      </section>
+    </div>
+  </main>
+<script>
+"use strict";
+
+const get = (id) => document.getElementById(id);
+const state = { token: null, window: null, spot: null, retry: null };
+const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+
+function notice(message = "", error = false) {
+  get("notice").textContent = message;
+  get("notice").hidden = !message;
+  get("notice").classList.toggle("error", error);
+}
+
+async function api(path, options = {}) {
+  const headers = new Headers(options.headers);
+  if (state.token && path !== "/auth/token") headers.set("Authorization", `Bearer ${state.token}`);
+  if (options.body) headers.set("Content-Type", "application/json");
+  const response = await fetch(path, { ...options, headers });
+  const result = await response.json();
+  if (!response.ok) {
+    if (response.status === 401 && path !== "/auth/token") setSignedOut();
+    const error = new Error(result.message || "The request failed.");
+    error.code = result.code;
+    throw error;
+  }
+  return result;
+}
+
+const dateFields = ["date", "hour", "minute"];
+const timeGroups = ["arrival", "departure"];
+
+function twoDigits(value) {
+  return String(value).padStart(2, "0");
+}
+
+for (const group of timeGroups) {
+  for (const [field, count] of [["hour", 24], ["minute", 60]]) {
+    const select = get(`${group}-${field}`);
+    for (let value = 0; value < count; value++) {
+      const label = twoDigits(value);
+      select.add(new Option(label, label));
+    }
+  }
+}
+
+function setLocalTime(group, date) {
+  const localDate = [date.getFullYear(), twoDigits(date.getMonth() + 1), twoDigits(date.getDate())].join("-");
+  get(`${group}-date`).value = localDate;
+  get(`${group}-hour`).value = twoDigits(date.getHours());
+  get(`${group}-minute`).value = twoDigits(date.getMinutes());
+}
+
+function localTimeValue(group) {
+  const [date, hour, minute] = dateFields.map((field) => get(`${group}-${field}`).value);
+  return `${date}T${hour}:${minute}`;
+}
+
+function toInstant(value) {
+  const date = new Date(value);
+  const wallTime = `${twoDigits(date.getHours())}:${twoDigits(date.getMinutes())}`;
+  if (!Number.isFinite(date.getTime()) || wallTime !== value.slice(-5)) {
+    throw new Error("Choose a valid local date and time.");
+  }
+  return date;
+}
+
+function formatWindow(start, end) {
+  return `${dateFormat.format(new Date(start))} → ${dateFormat.format(new Date(end))}`;
+}
+
+function clearSelection(message = "Search for a time window to see available spots.") {
+  state.window = null;
+  state.spot = null;
+  get("spots").replaceChildren();
+  get("lot-help").textContent = message;
+  get("selection").textContent = "Select a spot";
+  get("window").textContent = "";
+  get("reserve").disabled = true;
+}
+
+function setSignedOut() {
+  state.token = null;
+  state.retry = null;
+  clearSelection();
+  get("booking").reset();
+  get("reservations").replaceChildren();
+  get("workspace").hidden = true;
+  get("logout").hidden = true;
+  get("login-panel").hidden = false;
+}
+
+async function loadReservations() {
+  const bookings = await api("/me/reservations");
+  const rows = bookings.map((booking) => {
+    const row = document.createElement("article");
+    row.className = "booking-row";
+    const title = document.createElement("strong");
+    title.textContent = `${booking.spot_id} · Confirmed`;
+    const dates = document.createElement("p");
+    dates.textContent = formatWindow(booking.starts_at, booking.ends_at);
+    const id = document.createElement("code");
+    id.textContent = booking.id;
+    row.append(title, dates, id);
+    return row;
+  });
+  get("reservations").replaceChildren(...(rows.length ? rows : ["You have no reservations yet."]));
+}
+
+get("login").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  notice();
+  const button = event.submitter;
+  button.disabled = true;
+  try {
+    const body = JSON.stringify(Object.fromEntries(new FormData(event.currentTarget)));
+    state.token = (await api("/auth/token", { method: "POST", body })).access_token;
+    get("password").value = "";
+    const start = new Date(Date.now() + 30 * 60000);
+    setLocalTime("arrival", start);
+    setLocalTime("departure", new Date(start.getTime() + 2 * 3600000));
+    get("login-panel").hidden = true;
+    get("workspace").hidden = false;
+    get("logout").hidden = false;
+    await loadReservations();
+  } catch (error) {
+    notice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+get("logout").addEventListener("click", () => {
+  setSignedOut();
+  notice("You signed out.");
+});
+
+for (const group of timeGroups) {
+  for (const field of dateFields) {
+    get(`${group}-${field}`).addEventListener("change", () => clearSelection());
+  }
+}
+
+function renderSpots(spots) {
+  get("lot-help").textContent = spots.length
+    ? `${spots.length} available. Select a spot to continue.`
+    : "No spots are available for these times.";
+  for (const { id } of spots) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = id;
+    button.setAttribute("aria-pressed", "false");
+    button.addEventListener("click", () => {
+      const prior = get("spots").querySelector('[aria-pressed="true"]');
+      prior?.setAttribute("aria-pressed", "false");
+      button.setAttribute("aria-pressed", "true");
+      state.spot = id;
+      get("selection").textContent = id;
+      get("window").textContent = formatWindow(state.window.starts_at, state.window.ends_at);
+      get("reserve").disabled = false;
+    });
+    get("spots").append(button);
+  }
+}
+
+get("search").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  notice();
+  clearSelection();
+  const button = event.submitter;
+  button.disabled = true;
+  try {
+    const arrival = localTimeValue("arrival");
+    const departure = localTimeValue("departure");
+    const start = toInstant(arrival);
+    const end = toInstant(departure);
+    if (end <= start) throw new Error("Departure must be after arrival.");
+    const window = { starts_at: start.toISOString(), ends_at: end.toISOString() };
+    const token = state.token;
+    const spots = await api(`/spots?${new URLSearchParams(window)}`);
+    if (state.token === token && localTimeValue("arrival") === arrival && localTimeValue("departure") === departure) {
+      state.window = window;
+      renderSpots(spots);
+    }
+  } catch (error) {
+    notice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+get("booking").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.spot) return;
+  notice();
+  const button = event.submitter;
+  button.disabled = true;
+  const form = event.currentTarget;
+  const body = JSON.stringify({ spot_id: state.spot, ...state.window, ...Object.fromEntries(new FormData(form)) });
+  if (state.retry?.body !== body) state.retry = { body, key: crypto.randomUUID() };
+  const token = state.token;
+  let booking;
+  try {
+    booking = await api("/reservations", {
+      method: "POST", body, headers: { "Idempotency-Key": state.retry.key }
+    });
+  } catch (error) {
+    if (error.code === "spot_unavailable") clearSelection("That spot was taken. Check availability again.");
+    notice(error.message, true);
+  } finally {
+    button.disabled = !state.spot;
+  }
+
+  if (booking && token === state.token) {
+    state.retry = null;
+    clearSelection();
+    form.reset();
+    notice(`Spot ${booking.spot_id} is confirmed.`);
+    try {
+      await loadReservations();
+    } catch (error) {
+      notice(`Spot ${booking.spot_id} was booked. The reservation list could not refresh. ${error.message}`, true);
+    }
+  }
+});
+</script>
+</body>
+</html>
