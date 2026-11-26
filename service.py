@@ -1,26 +1,35 @@
 
-"""Business rules and reservation management for MetroSpot."""
+"""Business logic for MetroSpot."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from math import ceil
 from uuid import uuid4
 
 import repository as repo
+
+from config import (
+    HOURLY_RATE_CENTS,
+    HOLD_TTL_SECONDS
+)
 
 
 # Custom exception for business rule violations
 class ServiceError(Exception):
 
     def __init__(self, status, code, message):
+
         super().__init__(message)
+
         self.status = status
         self.code = code
 
 
-# Validate the requested reservation period
+# Validate the reservation time window
 def validate_window(start, end):
 
     if end <= start:
+
         raise ServiceError(
             400,
             "invalid_window",
@@ -28,79 +37,126 @@ def validate_window(start, end):
         )
 
 
-# Return available parking spots
+# Calculate the reservation price in cents
+def calculate_price(start, end):
+
+    validate_window(start, end)
+
+    duration = (end - start).total_seconds()
+
+    hours = ceil(duration / 3600)
+
+    return hours * HOURLY_RATE_CENTS
+
+
+# Retrieve available parking spots
 def list_spots(start, end):
 
     validate_window(start, end)
 
     with repo.database() as db:
-        return repo.available_spots(db, start, end)
 
-
-# Create a new parking reservation
-def create_reservation(driver_id, request_key, request):
-
-    # Normalize timestamps to UTC
-    request = request.model_copy(update={
-        "starts_at": request.starts_at.astimezone(timezone.utc),
-        "ends_at": request.ends_at.astimezone(timezone.utc),
-    })
-
-    # Generate a fingerprint of the request
-    fingerprint = sha256(
-        request.model_dump_json().encode()
-    ).hexdigest()
-
-    # Start a transaction with a write lock
-    with repo.database(write=True) as db:
-
-        # Check if this request was already submitted
-        saved = repo.find_request(
-            db, driver_id, request_key
+        return repo.available_spots(
+            db, start, end
         )
 
-        if saved:
 
-            # Reject reuse of a key with different request data
-            if saved["fingerprint"] != fingerprint:
+# Create a reservation awaiting payment
+def create_reservation(
+    driver_id,
+    request_key,
+    request,
+    correlation_id=None
+):
+
+    # Normalize reservation timestamps
+    request = request.model_copy(update={
+        "starts_at": request.starts_at.astimezone(
+            timezone.utc
+        ),
+        "ends_at": request.ends_at.astimezone(
+            timezone.utc
+        )
+    })
+
+    # Preserve fingerprints for existing approved requests
+    excluded = (
+        {"payment_method"}
+        if request.payment_method == "approved"
+        else set()
+    )
+
+    fingerprint = sha256(
+        request.model_dump_json(
+            exclude=excluded
+        ).encode()
+    ).hexdigest()
+
+    if correlation_id is None:
+
+        correlation_id = str(uuid4())
+
+    # All database changes occur in one transaction
+    with repo.database(write=True) as db:
+
+        # Release expired, unprocessed reservations
+        repo.expire_pending_reservations(db)
+
+        # Check whether this request already exists
+        previous = repo.find_request(
+            db,
+            driver_id,
+            request_key
+        )
+
+        if previous is not None:
+
+            if previous["fingerprint"] != fingerprint:
+
                 raise ServiceError(
                     409,
                     "idempotency_conflict",
-                    "This key belongs to a different booking request."
+                    "This idempotency key was already used "
+                    "with different reservation details."
                 )
 
-            # Return the existing reservation
             return repo.owned_reservation(
                 db,
-                saved["reservation_id"],
+                previous["reservation_id"],
                 driver_id
             )
 
-        # Validate the reservation period
+        # Validate reservation dates
         validate_window(
             request.starts_at,
             request.ends_at
         )
 
-        # Prevent reservations in the past
-        if request.starts_at < datetime.now(timezone.utc):
+        now = datetime.now(timezone.utc)
+
+        if request.starts_at < now:
+
             raise ServiceError(
                 400,
                 "past_arrival",
-                "Choose an arrival time in the future."
+                "Arrival cannot be in the past."
             )
 
-        # Check if the parking spot exists
-        spot = repo.find_spot(db, request.spot_id)
+        # Verify that the parking spot exists
+        spot = repo.find_spot(
+            db,
+            request.spot_id
+        )
 
         if spot is None:
+
             raise ServiceError(
                 404,
                 "spot_not_found",
-                "This spot does not exist."
+                "The requested parking spot does not exist."
             )
 
-        # Check for overlapping reservations
+        # Check whether the spot is already reserved
         overlap = repo.find_overlap(
             db,
             request.spot_id,
@@ -108,51 +164,75 @@ def create_reservation(driver_id, request_key, request):
             request.ends_at
         )
 
-        # Prevent double booking
-        if spot["occupied"] or overlap:
+        if spot["occupied"] or overlap is not None:
+
             raise ServiceError(
                 409,
                 "spot_unavailable",
-                "This spot is unavailable for the requested time."
+                "The parking spot is not available "
+                "for the requested time."
             )
 
-        # Generate a unique reservation ID
+        # Calculate the parking price
+        amount_cents = calculate_price(
+            request.starts_at,
+            request.ends_at
+        )
+
+        # Generate reservation ID and expiry time
         reservation_id = str(uuid4())
 
-        # Save the reservation and its idempotency key
+        expires_at = min(
+            now + timedelta(seconds=HOLD_TTL_SECONDS),
+            request.starts_at
+        )
+
+        # Save the reservation and payment task together
         return repo.save_reservation(
-            db,
-            request,
-            driver_id,
-            request_key,
-            fingerprint,
-            reservation_id
+            db=db,
+            request=request,
+            driver=driver_id,
+            key=request_key,
+            fingerprint=fingerprint,
+            reservation_id=reservation_id,
+            amount_cents=amount_cents,
+            expires_at=expires_at,
+            correlation_id=correlation_id
         )
 
 
-# Retrieve a reservation belonging to the current driver
+# Retrieve a reservation owned by the current driver
 def get_reservation(driver_id, reservation_id):
 
-    with repo.database() as db:
+    with repo.database(write=True) as db:
+
+        repo.expire_pending_reservations(db)
 
         reservation = repo.owned_reservation(
             db,
-            str(reservation_id),
+            reservation_id,
             driver_id
         )
 
-    if reservation is None:
-        raise ServiceError(
-            404,
-            "reservation_not_found",
-            "Reservation not found."
-        )
+        if reservation is None:
 
-    return reservation
+            raise ServiceError(
+                404,
+                "reservation_not_found",
+                "Reservation not found."
+            )
+
+        return reservation
 
 
-# Retrieve all reservations belonging to the current driver
+# Retrieve all reservations owned by the current driver
 def list_reservations(driver_id):
 
-    with repo.database() as db:
-        return repo.driver_reservations(db, driver_id)
+    with repo.database(write=True) as db:
+
+        repo.expire_pending_reservations(db)
+
+        return repo.driver_reservations(
+            db,
+            driver_id
+        )
