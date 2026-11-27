@@ -128,12 +128,28 @@ form > button { margin-top: 7px; }
             <input id="driver-name" name="driver_name" maxlength="100" autocomplete="name" required>
             <label for="plate">License plate</label>
             <input id="plate" name="license_plate" maxlength="16" pattern="[A-Za-z0-9][A-Za-z0-9 \-]{0,15}" placeholder="ABC123" required>
-            <button id="reserve" type="submit" disabled>Confirm reservation</button>
+            <label for="payment-method">Payment simulation</label>
+            <select id="payment-method" name="payment_method">
+              <option value="approved">Approved payment</option>
+              <option value="declined">Declined payment</option>
+            </select>
+            <button id="reserve" type="submit" disabled>Submit reservation</button>
           </form>
         </section>
       </div>
       <section class="panel history">
         <h2>My reservations</h2>
+        <label for="status-filter">Filter by status</label>
+        <select id="status-filter">
+          <option value="">All reservations</option>
+          <option value="pending_payment">Pending payment</option>
+          <option value="processing_payment">Processing payment</option>
+          <option value="confirmed">Confirmed</option>
+          <option value="failed">Failed</option>
+          <option value="expired">Expired</option>
+          <option value="payment_review">Payment review</option>
+        </select>
+        <button id="refresh" type="button">Refresh reservations</button>
         <div id="reservations"></div>
       </section>
     </div>
@@ -221,6 +237,7 @@ function clearSelection(message = "Search for a time window to see available spo
 function setSignedOut() {
   state.token = null;
   state.retry = null;
+  get("status-filter").value = "";
   clearSelection();
   get("booking").reset();
   get("reservations").replaceChildren();
@@ -230,20 +247,26 @@ function setSignedOut() {
 }
 
 async function loadReservations() {
-  const bookings = await api("/me/reservations");
+  const token = state.token;
+  const filter = get("status-filter").value;
+  const query = filter ? `?${new URLSearchParams({ status: filter })}` : "";
+  const bookings = await api(`/me/reservations${query}`);
+  if (token !== state.token || filter !== get("status-filter").value) return;
   const rows = bookings.map((booking) => {
     const row = document.createElement("article");
     row.className = "booking-row";
     const title = document.createElement("strong");
-    title.textContent = `${booking.spot_id} · Confirmed`;
+    title.textContent = `${booking.spot_id} · ${statusLabel(booking.status)}`;
     const dates = document.createElement("p");
     dates.textContent = formatWindow(booking.starts_at, booking.ends_at);
     const id = document.createElement("code");
     id.textContent = booking.id;
-    row.append(title, dates, id);
+    const price = document.createElement("p");
+    price.textContent = `Price: $${(booking.amount_cents / 100).toFixed(2)}`;
+    row.append(title, dates, price, id);
     return row;
   });
-  get("reservations").replaceChildren(...(rows.length ? rows : ["You have no reservations yet."]));
+  get("reservations").replaceChildren(...(rows.length ? rows : ["No matching reservations."]));
 }
 
 get("login").addEventListener("submit", async (event) => {
@@ -354,14 +377,46 @@ get("booking").addEventListener("submit", async (event) => {
     state.retry = null;
     clearSelection();
     form.reset();
-    notice(`Spot ${booking.spot_id} is confirmed.`);
+    notice(`Reservation accepted for ${booking.spot_id}. Checking payment…`);
     try {
       await loadReservations();
+      await trackPayment(booking, token);
     } catch (error) {
-      notice(`Spot ${booking.spot_id} was booked. The reservation list could not refresh. ${error.message}`, true);
+      if (token === state.token) notice(`Reservation accepted. Refresh your history to check its status. ${error.message}`, true);
     }
   }
 });
+
+function statusLabel(status) {
+  return ({ pending_payment: "Pending payment", processing_payment: "Processing payment",
+    confirmed: "Confirmed", failed: "Payment declined", expired: "Expired",
+    payment_review: "Payment review" })[status] || status;
+}
+
+async function trackPayment(booking, token) {
+  for (let attempt = 0; attempt < 25; attempt++) {
+    if (token !== state.token) return;
+    if (!["pending_payment", "processing_payment"].includes(booking.status)) {
+      notice(`Spot ${booking.spot_id}: ${statusLabel(booking.status)}.`, booking.status !== "confirmed");
+      await loadReservations();
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    if (token !== state.token) return;
+    booking = await api(`/reservations/${booking.id}`);
+    if (token !== state.token) return;
+    await loadReservations();
+  }
+  if (token === state.token) notice("Payment is still pending. Refresh your reservations to check again.");
+}
+
+async function refreshHistory() {
+  try { await loadReservations(); }
+  catch (error) { notice(error.message, true); }
+}
+get("status-filter").addEventListener("change", refreshHistory);
+get("refresh").addEventListener("click", refreshHistory);
+
 </script>
 </body>
 </html>
