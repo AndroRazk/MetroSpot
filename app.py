@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 from uuid import UUID, uuid4
 from time import perf_counter
+from datetime import datetime, timezone
 
 import json
 import logging
@@ -27,13 +28,15 @@ import service
 # Initialize the database when the application starts
 @asynccontextmanager
 async def lifespan(app):
+
     repo.migrate()
+
     yield
 
 
 app = FastAPI(
     title="MetroSpot API",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
     debug=False
 )
@@ -57,7 +60,11 @@ RequestKey = Annotated[
 
 # Document API error responses
 def errors(*codes):
-    return {code: {"model": Error} for code in codes}
+
+    return {
+        code: {"model": Error}
+        for code in codes
+    }
 
 
 # Return a consistent error response
@@ -80,14 +87,17 @@ def error_response(request, status, code, message):
 async def request_context(request, call_next):
 
     correlation_id = str(uuid4())
+
     request.state.correlation_id = correlation_id
 
     started = perf_counter()
 
     try:
+
         response = await call_next(request)
 
     except Exception:
+
         log.exception(
             "Unexpected error for request %s",
             correlation_id
@@ -103,6 +113,11 @@ async def request_context(request, call_next):
     response.headers["X-Correlation-ID"] = correlation_id
 
     log.info(json.dumps({
+        "timestamp": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "component": "metrospot_api",
+        "event": "request_completed",
         "correlation_id": correlation_id,
         "method": request.method,
         "path": request.url.path,
@@ -213,26 +228,31 @@ def spots(
     ends_at: AwareDatetime
 ):
 
-    return service.list_spots(starts_at, ends_at)
+    return service.list_spots(
+        starts_at,
+        ends_at
+    )
 
 
-# Create a parking reservation
+# Submit a reservation for asynchronous payment
 @app.post(
     "/reservations",
-    status_code=201,
+    status_code=202,
     response_model=Reservation,
     responses=errors(400, 401, 404, 409, 503)
 )
 def reserve(
     request: ReservationInput,
     driver: Driver,
-    request_key: RequestKey
+    request_key: RequestKey,
+    http_request: Request
 ):
 
     return service.create_reservation(
-        driver,
-        request_key,
-        request
+        driver_id=driver,
+        request_key=request_key,
+        request=request,
+        correlation_id=http_request.state.correlation_id
     )
 
 
@@ -247,13 +267,16 @@ def my_reservations(driver: Driver):
     return service.list_reservations(driver)
 
 
-# Retrieve a specific reservation
+# Retrieve a specific reservation and its payment status
 @app.get(
     "/reservations/{reservation_id}",
     response_model=Reservation,
     responses=errors(400, 401, 404, 503)
 )
-def reservation(reservation_id: UUID, driver: Driver):
+def reservation(
+    reservation_id: UUID,
+    driver: Driver
+):
 
     return service.get_reservation(
         driver,
@@ -270,10 +293,16 @@ def published_openapi():
     schema = default_openapi()
 
     for path in schema["paths"].values():
+
         for operation in path.values():
+
             operation["responses"].pop("422", None)
 
-    for name in ("HTTPValidationError", "ValidationError"):
+    for name in (
+        "HTTPValidationError",
+        "ValidationError"
+    ):
+
         schema.get("components", {}).get(
             "schemas", {}
         ).pop(name, None)
