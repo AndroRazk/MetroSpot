@@ -1,0 +1,541 @@
+openapi: 3.1.0
+info:
+  title: MetroSpot API
+  version: 0.2.0
+  description: '
+
+    MetroSpot is a parking reservation service that allows
+
+    authenticated drivers to search for available parking spots,
+
+    submit reservations and track their payment status.
+
+
+    Reservations are processed asynchronously through an
+
+    independent payment provider using a durable outbox.
+
+
+    All reservation operations enforce ownership and prevent
+
+    overlapping bookings for the same parking spot.
+
+    '
+paths:
+  /health/live:
+    get:
+      summary: Live
+      operationId: live_health_live_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+      description: '
+
+        Indicates whether the MetroSpot API process is running.
+
+        '
+  /health/ready:
+    get:
+      summary: Ready
+      operationId: ready_health_ready_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      description: '
+
+        Checks whether the MetroSpot API can access its database.
+
+
+        Payment provider availability is not required because payment
+
+        operations are processed asynchronously.
+
+        '
+  /auth/token:
+    post:
+      summary: Login
+      operationId: login_auth_token_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Login'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Token'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      description: '
+
+        Authenticates a driver using their username and password.
+
+
+        Returns a JWT access token that must be included in the
+
+        Authorization header as a Bearer token for protected endpoints.
+
+        '
+  /spots:
+    get:
+      summary: Spots
+      operationId: spots_spots_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: starts_at
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: Starts At
+      - name: ends_at
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: Ends At
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Spot'
+                title: Response Spots Spots Get
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Service Unavailable
+      description: '
+
+        Returns parking spots available during the requested time window.
+
+
+        The departure time must be later than the arrival time.
+
+
+        Confirmed reservations, active pending reservations and
+
+        unresolved payment operations prevent overlapping bookings.
+
+        '
+  /reservations:
+    post:
+      summary: Reserve
+      operationId: reserve_reservations_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 120
+          pattern: ^[!-~]+$
+          title: Idempotency-Key
+        description: Unique request key scoped to the authenticated driver. Reuse
+          the same key when retrying the same reservation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReservationInput'
+      responses:
+        '202':
+          description: Reservation accepted or existing idempotent reservation returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Invalid request data or reservation time window.
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Missing or invalid authentication token.
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Requested parking spot does not exist.
+        '409':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Parking spot unavailable or idempotency key conflict.
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Database temporarily unavailable.
+      description: '
+
+        Submits a parking reservation for asynchronous payment processing.
+
+
+        A successful request returns HTTP 202 Accepted. This does not
+
+        guarantee that the payment has been approved.
+
+
+        The reservation and its payment outbox operation are saved
+
+        atomically in the database.
+
+
+        An Idempotency-Key header is required. Reusing the same key
+
+        with identical reservation details returns the original
+
+        reservation. Reusing the key with different details returns
+
+        HTTP 409 Conflict.
+
+
+        Idempotency keys are scoped to the authenticated driver.
+
+
+        Overlapping reservations for the same parking spot are rejected.
+
+        '
+  /me/reservations:
+    get:
+      summary: My Reservations
+      operationId: my_reservations_me_reservations_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Reservation'
+                type: array
+                title: Response My Reservations Me Reservations Get
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - HTTPBearer: []
+      description: '
+
+        Returns reservations belonging to the authenticated driver,
+
+        including pending, processing, confirmed, failed, expired
+
+        and payment review reservations.
+
+        '
+  /reservations/{reservation_id}:
+    get:
+      summary: Reservation
+      operationId: reservation_reservations__reservation_id__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: reservation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Reservation Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Service Unavailable
+      description: '
+
+        Returns the current status of a reservation.
+
+
+        Only the reservation owner can retrieve it.
+
+
+        A nonexistent reservation or a reservation belonging to
+
+        another driver returns HTTP 404 to avoid exposing private data.
+
+
+        Clients can poll this endpoint to track payment progress.
+
+        '
+components:
+  schemas:
+    Error:
+      properties:
+        code:
+          type: string
+          title: Code
+        message:
+          type: string
+          title: Message
+        correlation_id:
+          type: string
+          title: Correlation Id
+      type: object
+      required:
+      - code
+      - message
+      - correlation_id
+      title: Error
+    Login:
+      properties:
+        username:
+          type: string
+          enum:
+          - driver-a
+          - driver-b
+          title: Username
+        password:
+          type: string
+          maxLength: 200
+          minLength: 1
+          title: Password
+      additionalProperties: false
+      type: object
+      required:
+      - username
+      - password
+      title: Login
+    Reservation:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        spot_id:
+          type: string
+          pattern: ^P-[0-9]{3}$
+          title: Spot Id
+        starts_at:
+          type: string
+          format: date-time
+          title: Starts At
+        ends_at:
+          type: string
+          format: date-time
+          title: Ends At
+        status:
+          type: string
+          enum:
+          - pending_payment
+          - processing_payment
+          - confirmed
+          - failed
+          - expired
+          - payment_review
+          title: Status
+          default: confirmed
+          description: '
+
+            Reservation lifecycle:
+
+
+            pending_payment: Waiting for payment processing.
+
+
+            processing_payment: Payment processing has started.
+
+
+            confirmed: Payment approved and reservation confirmed.
+
+
+            failed: Payment definitively declined and parking spot released.
+
+
+            expired: Unprocessed reservation exceeded its holding period.
+
+
+            payment_review: Payment outcome remains uncertain after
+
+            automatic retries. Operator reconciliation is required.
+
+            '
+        amount_cents:
+          type: integer
+          title: Amount Cents
+          default: 0
+          description: Reservation price in cents.
+        expires_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Expires At
+          description: Expiration time of the initial unpaid reservation hold.
+        payment_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Payment Id
+          description: Payment identifier returned by the payment provider, when available.
+      type: object
+      required:
+      - id
+      - spot_id
+      - starts_at
+      - ends_at
+      title: Reservation
+    ReservationInput:
+      properties:
+        spot_id:
+          type: string
+          pattern: ^P-[0-9]{3}$
+          title: Spot Id
+        starts_at:
+          type: string
+          format: date-time
+          title: Starts At
+        ends_at:
+          type: string
+          format: date-time
+          title: Ends At
+        driver_name:
+          type: string
+          maxLength: 100
+          minLength: 1
+          title: Driver Name
+        license_plate:
+          type: string
+          pattern: ^[A-Za-z0-9][A-Za-z0-9 -]{0,15}$
+          title: License Plate
+        payment_method:
+          type: string
+          enum:
+          - approved
+          - declined
+          title: Payment Method
+          default: approved
+          description: Simulated payment outcome for demonstration purposes. Use approved
+            for a successful payment or declined for a rejected payment.
+      additionalProperties: false
+      type: object
+      required:
+      - spot_id
+      - starts_at
+      - ends_at
+      - driver_name
+      - license_plate
+      title: ReservationInput
+    Spot:
+      properties:
+        id:
+          type: string
+          pattern: ^P-[0-9]{3}$
+          title: Id
+      type: object
+      required:
+      - id
+      title: Spot
+    Token:
+      properties:
+        access_token:
+          type: string
+          title: Access Token
+        token_type:
+          type: string
+          const: bearer
+          title: Token Type
+          default: bearer
+      type: object
+      required:
+      - access_token
+      title: Token
+  securitySchemes:
+    HTTPBearer:
+      type: http
+      scheme: bearer

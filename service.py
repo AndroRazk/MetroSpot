@@ -1,5 +1,5 @@
 
-"""Business logic for MetroSpot."""
+"""MetroSpot business logic and reservation rules."""
 
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -8,13 +8,10 @@ from uuid import uuid4
 
 import repository as repo
 
-from config import (
-    HOURLY_RATE_CENTS,
-    HOLD_TTL_SECONDS
-)
+from config import HOURLY_RATE_CENTS, HOLD_TTL_SECONDS
 
 
-# Custom exception for business rule violations
+# Business rule exception
 class ServiceError(Exception):
 
     def __init__(self, status, code, message):
@@ -37,16 +34,14 @@ def validate_window(start, end):
         )
 
 
-# Calculate the reservation price in cents
+# Calculate the reservation price
 def calculate_price(start, end):
 
     validate_window(start, end)
 
     duration = (end - start).total_seconds()
 
-    hours = ceil(duration / 3600)
-
-    return hours * HOURLY_RATE_CENTS
+    return ceil(duration / 3600) * HOURLY_RATE_CENTS
 
 
 # Retrieve available parking spots
@@ -56,12 +51,10 @@ def list_spots(start, end):
 
     with repo.database() as db:
 
-        return repo.available_spots(
-            db, start, end
-        )
+        return repo.available_spots(db, start, end)
 
 
-# Create a reservation awaiting payment
+# Create a reservation and its payment operation
 def create_reservation(
     driver_id,
     request_key,
@@ -69,17 +62,11 @@ def create_reservation(
     correlation_id=None
 ):
 
-    # Normalize reservation timestamps
     request = request.model_copy(update={
-        "starts_at": request.starts_at.astimezone(
-            timezone.utc
-        ),
-        "ends_at": request.ends_at.astimezone(
-            timezone.utc
-        )
+        "starts_at": request.starts_at.astimezone(timezone.utc),
+        "ends_at": request.ends_at.astimezone(timezone.utc)
     })
 
-    # Preserve fingerprints for existing approved requests
     excluded = (
         {"payment_method"}
         if request.payment_method == "approved"
@@ -96,13 +83,11 @@ def create_reservation(
 
         correlation_id = str(uuid4())
 
-    # All database changes occur in one transaction
     with repo.database(write=True) as db:
 
-        # Release expired, unprocessed reservations
         repo.expire_pending_reservations(db)
 
-        # Check whether this request already exists
+        # Check whether the request was already processed
         previous = repo.find_request(
             db,
             driver_id,
@@ -126,7 +111,7 @@ def create_reservation(
                 driver_id
             )
 
-        # Validate reservation dates
+        # Validate the requested time window
         validate_window(
             request.starts_at,
             request.ends_at
@@ -156,7 +141,7 @@ def create_reservation(
                 "The requested parking spot does not exist."
             )
 
-        # Check whether the spot is already reserved
+        # Prevent overlapping reservations
         overlap = repo.find_overlap(
             db,
             request.spot_id,
@@ -173,13 +158,12 @@ def create_reservation(
                 "for the requested time."
             )
 
-        # Calculate the parking price
+        # Calculate the reservation price
         amount_cents = calculate_price(
             request.starts_at,
             request.ends_at
         )
 
-        # Generate reservation ID and expiry time
         reservation_id = str(uuid4())
 
         expires_at = min(
@@ -187,7 +171,7 @@ def create_reservation(
             request.starts_at
         )
 
-        # Save the reservation and payment task together
+        # Save reservation and payment operation atomically
         return repo.save_reservation(
             db=db,
             request=request,
@@ -201,7 +185,7 @@ def create_reservation(
         )
 
 
-# Retrieve a reservation owned by the current driver
+# Retrieve a reservation belonging to the driver
 def get_reservation(driver_id, reservation_id):
 
     with repo.database(write=True) as db:
@@ -225,14 +209,27 @@ def get_reservation(driver_id, reservation_id):
         return reservation
 
 
-# Retrieve all reservations owned by the current driver
-def list_reservations(driver_id):
+# Retrieve the driver's reservations
+# The optional status filter preserves existing behavior
+def list_reservations(driver_id, status=None):
 
     with repo.database(write=True) as db:
 
         repo.expire_pending_reservations(db)
 
-        return repo.driver_reservations(
+        reservations = repo.driver_reservations(
             db,
             driver_id
         )
+
+        # Existing clients receive all reservations
+        if status is None:
+
+            return reservations
+
+        # New clients can filter reservations by status
+        return [
+            reservation
+            for reservation in reservations
+            if reservation["status"] == status
+        ]

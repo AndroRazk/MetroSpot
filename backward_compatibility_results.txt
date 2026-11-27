@@ -1,0 +1,21 @@
+PASS: Liveness response conforms
+PASS: Readiness response conforms
+PASS: Authentication responses conform
+PASS: Invalid credentials response conforms
+PASS: Missing authentication response conforms
+PASS: Available parking spots response conforms
+PASS: Asynchronous reservation response conforms
+PASS: Idempotent retry response conforms
+PASS: Idempotency conflict response conforms
+PASS: Reservation conflict response conforms
+PASS: Confirmed reservation response conforms
+PASS: Ownership protection response conforms
+PASS: Nonexistent reservation response conforms
+PASS: Invalid time window response conforms
+PASS: Missing idempotency key response conforms
+PASS: Invalid payment method response conforms
+PASS: Declined payment response conforms
+PASS: Reservation history response conforms
+PASS: Reservation history ownership enforced
+
+All 19 API conformance tests passed

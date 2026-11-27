@@ -11,14 +11,24 @@ import json
 import logging
 import sqlite3
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Request, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 
 from pydantic import AwareDatetime
 
 from config import BASE_DIR
-from models import Login, Token, ReservationInput, Reservation, Spot, Error
+
+from models import (
+    Login,
+    Token,
+    ReservationInput,
+    Reservation,
+    ReservationStatus,
+    Spot,
+    Error
+)
+
 from auth import issue_token, current_driver
 
 import repository as repo
@@ -36,7 +46,7 @@ async def lifespan(app):
 
 app = FastAPI(
     title="MetroSpot API",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
     debug=False
 )
@@ -257,14 +267,30 @@ def reserve(
 
 
 # Retrieve the authenticated driver's reservations
+# Version 0.3.0 introduces an optional status filter
 @app.get(
     "/me/reservations",
     response_model=list[Reservation],
-    responses=errors(401, 503)
+    responses=errors(400, 401, 503)
 )
-def my_reservations(driver: Driver):
+def my_reservations(
+    driver: Driver,
+    status: Annotated[
+        ReservationStatus | None,
+        Query(
+            description=(
+                "Optional reservation status filter. "
+                "If omitted, all reservations belonging "
+                "to the authenticated driver are returned."
+            )
+        )
+    ] = None
+):
 
-    return service.list_reservations(driver)
+    return service.list_reservations(
+        driver,
+        status
+    )
 
 
 # Retrieve a specific reservation and its payment status
@@ -284,20 +310,33 @@ def reservation(
     )
 
 
-# Keep the OpenAPI contract consistent with HTTP 400 validation
+# Preserve FastAPI's original OpenAPI generator
 default_openapi = app.openapi
 
 
+# Publish the extended OpenAPI contract
 def published_openapi():
 
+    contract_path = BASE_DIR / "openapi.json"
+
+    # Use the exported contract when available
+    if contract_path.exists():
+
+        with open(contract_path, "r") as file:
+
+            return json.load(file)
+
+    # Otherwise, generate the contract from the API
     schema = default_openapi()
 
+    # Validation errors return HTTP 400 instead of 422
     for path in schema["paths"].values():
 
         for operation in path.values():
 
             operation["responses"].pop("422", None)
 
+    # Remove unused validation error schemas
     for name in (
         "HTTPValidationError",
         "ValidationError"
