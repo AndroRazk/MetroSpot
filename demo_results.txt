@@ -1,0 +1,11 @@
+PASS: Both drivers authenticated
+PASS: Health checks and correlation IDs working
+PASS: Concurrent booking of P-001: one HTTP 202 and one HTTP 409
+PASS: Asynchronous payment confirmed
+PASS: Idempotent retry returned the original reservation and payment
+PASS: Authentication and ownership protection working
+PASS: Declined payment handled correctly
+PASS: Failed reservation released and confirmed reservation protected
+
+All 8 final demonstration tests passed.
+Confirmed reservation ID: d24dec05-67a1-4951-b378-a6279813e337

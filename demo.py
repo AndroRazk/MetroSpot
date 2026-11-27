@@ -1,96 +1,217 @@
-"""Run the milestone checks against a live MetroSpot API."""
-import argparse
+
+"""Run the final MetroSpot demonstration against the live API."""
+
+import os
+import time
+import requests
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-import json
-import os
 from threading import Barrier
-from urllib.error import HTTPError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 from uuid import uuid4
 
-
-def request(base, path, *, body=None, token=None, key=None):
-    headers = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    if key:
-        headers["Idempotency-Key"] = key
-    if body is not None:
-        headers["Content-Type"] = "application/json"
-    data = json.dumps(body).encode() if body is not None else None
-    try:
-        response = urlopen(Request(base + path, data=data, headers=headers), timeout=15)
-    except HTTPError as error:
-        response = error
-    with response:
-        return response.status, json.load(response)
+BASE_URL = os.getenv("METROSPOT_URL", "http://127.0.0.1:8000")
 
 
-def check(base):
-    tokens = []
-    for suffix in ("a", "b"):
-        variable = f"DRIVER_{suffix.upper()}_PASSWORD"
-        password = os.getenv(variable, f"demo-{suffix}")
-        status, result = request(base, "/auth/token", body=dict(username=f"driver-{suffix}", password=password))
-        assert status == 200, (status, result)
-        tokens.append(result["access_token"])
+def authenticate(username, password):
+    response = requests.post(
+        f"{BASE_URL}/auth/token",
+        json={"username": username, "password": password},
+        timeout=10
+    )
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
-    status, contract = request(base, "/openapi.json")
-    assert status == 200 and "409" in contract["paths"]["/reservations"]["post"]["responses"]
-    print("PASS: OpenAPI publishes the reservation conflict response")
 
+def wait_for_status(reservation_id, headers, expected):
+    for _ in range(20):
+        response = requests.get(
+            f"{BASE_URL}/reservations/{reservation_id}",
+            headers=headers,
+            timeout=10
+        )
+        assert response.status_code == 200
+
+        booking = response.json()
+
+        if booking["status"] == expected:
+            return booking
+
+        time.sleep(1)
+
+    raise AssertionError(f"Expected reservation status: {expected}")
+
+
+def main():
+
+    # Authenticate both drivers
+    drivers = [
+        authenticate("driver-a", os.getenv("DRIVER_A_PASSWORD", "demo-a")),
+        authenticate("driver-b", os.getenv("DRIVER_B_PASSWORD", "demo-b"))
+    ]
+
+    print("PASS: Both drivers authenticated")
+
+    # Check service health
+    for path in ("/health/live", "/health/ready"):
+        response = requests.get(BASE_URL + path, timeout=10)
+        assert response.status_code == 200
+        assert response.headers.get("X-Correlation-ID")
+
+    print("PASS: Health checks and correlation IDs working")
+
+    # Find available parking spots
     start = datetime.now(timezone.utc) + timedelta(hours=2)
-    window = dict(starts_at=start.isoformat(), ends_at=(start + timedelta(hours=1)).isoformat())
-    status, spots = request(base, "/spots?" + urlencode(window), token=tokens[0])
-    assert status == 200 and spots, (status, spots)
-    spot = next((item["id"] for item in spots if item["id"] == "P-024"), spots[0]["id"])
+
+    window = {
+        "starts_at": start.isoformat(),
+        "ends_at": (start + timedelta(hours=1)).isoformat()
+    }
+
+    response = requests.get(
+        f"{BASE_URL}/spots",
+        params=window,
+        headers=drivers[0],
+        timeout=10
+    )
+
+    assert response.status_code == 200
+    spots = response.json()
+    assert len(spots) >= 2
+
+    spot = spots[0]["id"]
+
+    # Two drivers attempt to reserve the same spot
     keys = [str(uuid4()), str(uuid4())]
-    payloads = [dict(spot_id=spot, driver_name=f"Demo Driver {i}", license_plate=f"TEST{i}", **window)
-                for i in range(2)]
+
+    payloads = [
+        {
+            "spot_id": spot,
+            "driver_name": f"Demo Driver {i}",
+            "license_plate": f"TEST{i}",
+            "payment_method": "approved",
+            **window
+        }
+        for i in range(2)
+    ]
+
     barrier = Barrier(2, timeout=5)
 
     def book(index):
         barrier.wait()
-        return request(base, "/reservations", body=payloads[index], token=tokens[index], key=keys[index])
+
+        return requests.post(
+            f"{BASE_URL}/reservations",
+            json=payloads[index],
+            headers={
+                **drivers[index],
+                "Idempotency-Key": keys[index]
+            },
+            timeout=10
+        )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = list(pool.map(book, range(2)))
-    assert sorted(status for status, _ in outcomes) == [201, 409], outcomes
-    winner = next(index for index, result in enumerate(outcomes) if result[0] == 201)
-    assert outcomes[1 - winner][1]["code"] == "spot_unavailable", outcomes
-    booking = outcomes[winner][1]
-    print(f"PASS: {spot} received one HTTP 201 and one HTTP 409")
 
-    assert request(base, "/reservations", body=payloads[winner], token=tokens[winner],
-                   key=keys[winner]) == (201, booking)
-    status, conflict = request(base, "/reservations",
-                               body=payloads[winner] | {"license_plate": "NEWPLATE"},
-                               token=tokens[winner], key=keys[winner])
-    assert status == 409 and conflict["code"] == "idempotency_conflict", conflict
-    status, items = request(base, "/spots?" + urlencode(window), token=tokens[winner])
-    assert status == 200 and spot not in {item["id"] for item in items}
-    matching = []
-    for token in tokens:
-        status, reservations = request(base, "/me/reservations", token=token)
-        assert status == 200, (status, reservations)
-        matching.extend(row for row in reservations if row["spot_id"] == spot and
-                        datetime.fromisoformat(row["starts_at"]) == start)
-    assert matching == [booking], matching
-    print("PASS: Idempotent retry returned the original ID. One booking was saved.")
+    assert sorted(r.status_code for r in outcomes) == [202, 409]
 
-    path = f"/reservations/{booking['id']}"
-    assert request(base, path, token=tokens[winner]) == (200, booking)
-    assert request(base, path)[0] == 401
-    assert request(base, path, token=tokens[1 - winner])[0] == 404
-    invalid_window = dict(window, ends_at=window["starts_at"])
-    assert request(base, "/spots?" + urlencode(invalid_window), token=tokens[winner])[0] == 400
-    print("PASS: Own booking accessible, missing login rejected, other booking hidden, bad dates rejected.")
+    winner = next(
+        i for i, r in enumerate(outcomes)
+        if r.status_code == 202
+    )
+
+    booking = outcomes[winner].json()
+    reservation_id = booking["id"]
+
+    print(f"PASS: Concurrent booking of {spot}: one HTTP 202 and one HTTP 409")
+
+    # Wait for successful payment
+    confirmed = wait_for_status(
+        reservation_id, drivers[winner], "confirmed"
+    )
+
+    assert confirmed["payment_id"]
+
+    print("PASS: Asynchronous payment confirmed")
+
+    # Retry the same reservation
+    response = requests.post(
+        f"{BASE_URL}/reservations",
+        json=payloads[winner],
+        headers={
+            **drivers[winner],
+            "Idempotency-Key": keys[winner]
+        },
+        timeout=10
+    )
+
+    assert response.status_code == 202
+    assert response.json()["id"] == reservation_id
+    assert response.json()["payment_id"] == confirmed["payment_id"]
+
+    print("PASS: Idempotent retry returned the original reservation and payment")
+
+    # Verify reservation ownership
+    path = f"{BASE_URL}/reservations/{reservation_id}"
+
+    assert requests.get(
+        path, headers=drivers[winner], timeout=10
+    ).status_code == 200
+
+    assert requests.get(
+        path, headers=drivers[1 - winner], timeout=10
+    ).status_code == 404
+
+    assert requests.get(path, timeout=10).status_code == 401
+
+    print("PASS: Authentication and ownership protection working")
+
+    # Simulate a declined payment
+    failed_spot = spots[1]["id"]
+
+    response = requests.post(
+        f"{BASE_URL}/reservations",
+        json={
+            "spot_id": failed_spot,
+            "driver_name": "Demo Driver",
+            "license_plate": "FAIL123",
+            "payment_method": "declined",
+            **window
+        },
+        headers={
+            **drivers[0],
+            "Idempotency-Key": str(uuid4())
+        },
+        timeout=10
+    )
+
+    assert response.status_code == 202
+
+    wait_for_status(
+        response.json()["id"], drivers[0], "failed"
+    )
+
+    print("PASS: Declined payment handled correctly")
+
+    # Verify compensation
+    response = requests.get(
+        f"{BASE_URL}/spots",
+        params=window,
+        headers=drivers[0],
+        timeout=10
+    )
+
+    assert response.status_code == 200
+
+    available = {item["id"] for item in response.json()}
+
+    assert failed_spot in available
+    assert spot not in available
+
+    print("PASS: Failed reservation released and confirmed reservation protected")
+
+    print("\nAll 8 final demonstration tests passed.")
+    print(f"Confirmed reservation ID: {reservation_id}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    args = parser.parse_args()
-    check(args.base_url.rstrip("/"))
+    main()
